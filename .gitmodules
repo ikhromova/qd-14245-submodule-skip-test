@@ -1,0 +1,3 @@
+[submodule "libs/accessible-sub"]
+	path = libs/accessible-sub
+	url = https://github.com/ikhromova/qd-14245-submodule-content.git
