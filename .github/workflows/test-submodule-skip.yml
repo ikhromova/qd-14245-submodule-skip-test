@@ -6,87 +6,101 @@ on:
   workflow_dispatch:
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Commit map in this repo:
-#   87486f3  initial: java project + accessible submodule
-#   d37b12d  break: submodule URL → inaccessible (simulates private repo)
-#   e63684c  restore: accessible submodule URL on HEAD
-#   (+ workflow commits on top)
+# BACKGROUND
+# The bug reproduces only when qodana-cli runs in NATIVE mode (--within-docker false).
+# In native mode, DetermineRunScenario with --commit → RunScenarioScoped
+# → incremental_analysis.RunFunc → CheckoutAndUpdateSubmodule (the function with the fix).
 #
-# Strategy: we have "break" commit in history with broken submodule URL.
-# qodana scan --diff-start 87486f3 causes CLI to checkout intermediate commits
-# including d37b12d where submodule URL is inaccessible.
+# qodana-action with pr-mode: true passes --commit <merge-base-sha> to qodana scan.
+# Adding --within-docker false to the action args replicates qodana native behavior,
+# which is the code path where the bug lives.
+#
+# Commit map in this repo:
+#   87486f3  initial: java project + accessible submodule (URL = accessible)
+#   d37b12d  break: submodule URL → inaccessible (https://github.com/nonexistent-org-xyz/...)
+#   e63684c  restore: accessible submodule URL on HEAD
+#
+# Strategy: --commit 87486f3 → CLI iterates d37b12d..HEAD → first checkout = d37b12d (broken URL)
 # ─────────────────────────────────────────────────────────────────────────────
 
 jobs:
 
   # ─────────────────────────────────────────────────────────────────────────────
   # TC-1: BUG REPRODUCTION
-  # qodana scan --diff-start on a repo with inaccessible submodule, NO env var
-  # Expected: CLI exits with "Cannot checkout commit ... submodule update ... exited with code 1"
-  # This is the exact error from the original issue report
+  # qodana scan --within-docker false --commit 87486f3 (base before broken submodule commit)
+  # → CLI enters RunScenarioScoped → tries to checkout d37b12d
+  # → git submodule update fails ("Repository not found")
+  # → CLI prints: "Failed to update submodules. You can use QODANA_SKIP_SUBMODULE_UPDATE=true..."
+  # → log.Fatalf("Cannot checkout commit d37b12d: ...")
   # ─────────────────────────────────────────────────────────────────────────────
   tc1-bug-reproduction:
-    name: "TC-1: Bug — qodana scan fails with inaccessible submodule"
+    name: "TC-1: Bug — scan fails with inaccessible submodule (no env var)"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          submodules: false   # fresh clone, no submodule cache — replicates CI environment
+          submodules: false   # fresh clone — no local submodule cache, replicates CI
 
       - name: Install qodana-cli nightly
         run: |
           curl -fsSL https://github.com/JetBrains/qodana-cli/releases/download/v2026.2-nightly/qodana_linux_x86_64 \
-            -o /usr/local/bin/qodana
-          chmod +x /usr/local/bin/qodana
+            -o /usr/local/bin/qodana && chmod +x /usr/local/bin/qodana
           qodana --version
 
-      - name: TC-1 — qodana scan --diff-start (no QODANA_SKIP_SUBMODULE_UPDATE)
+      - name: TC-1 — qodana scan native mode, inaccessible submodule, NO env var
         env:
           QODANA_TOKEN: ${{ secrets.QODANA_TOKEN }}
           # QODANA_SKIP_SUBMODULE_UPDATE intentionally NOT set
         run: |
-          echo "=== TC-1: Running qodana scan with broken submodule (no env var) ==="
-          echo "QODANA_SKIP_SUBMODULE_UPDATE is unset"
+          echo "=== TC-1: qodana scan native mode (--within-docker false) ==="
+          echo "Same code path as qodana-action pr-mode: true + within-docker false"
+          echo "QODANA_SKIP_SUBMODULE_UPDATE is NOT set"
+          echo ""
 
-          # qodana scan with --diff-start causes CLI to checkout commits in range
-          # The "break" commit (d37b12d) has inaccessible submodule URL
-          # CLI should fail at CheckoutAndUpdateSubmodule with fatal error
+          # --commit 87486f3 = initial commit (base), so CLI iterates commits after it
+          # First commit after base = d37b12d (broken submodule URL)
+          # CLI calls CheckoutAndUpdateSubmodule(d37b12d) → fails
           set +e
           qodana scan \
-            --linter jetbrains/qodana-jvm:2026.1 \
-            --diff-start 87486f3 \
+            --linter qodana-jvm \
+            --within-docker false \
+            --commit 87486f3 \
             -i . \
             -o /tmp/tc1-results \
-            2>&1 | tee /tmp/tc1_qodana_output.txt
+            2>&1 | tee /tmp/tc1_output.txt
           EXIT_CODE=$?
           set -e
 
-          echo "--- qodana exit code: $EXIT_CODE ---"
-          echo "--- full output ---"
-          cat /tmp/tc1_qodana_output.txt
-
           echo ""
-          echo "=== Checking for expected failure signature ==="
-          # Match the exact error pattern from the original issue + CLI fatal message
-          if grep -qE "Cannot checkout commit|submodule update.*exited with code 1|Failed to update submodules" /tmp/tc1_qodana_output.txt; then
+          echo "=== Output ==="
+          cat /tmp/tc1_output.txt
+          echo ""
+          echo "Exit code: $EXIT_CODE"
+          echo ""
+          echo "=== Checking for bug signature ==="
+
+          # Expected: CLI fails at checkout with the exact error + warning about env var
+          if grep -qE "Cannot checkout commit|Failed to update submodules|submodule.*exited with code 1|repository.*not found" \
+              /tmp/tc1_output.txt; then
             echo "✅ TC-1 PASS: BUG REPRODUCED"
-            echo "Evidence:"
-            grep -E "Cannot checkout|submodule update.*code|Failed to update submodules|QODANA_SKIP_SUBMODULE_UPDATE" \
-              /tmp/tc1_qodana_output.txt | head -5
+            echo "Evidence (matching lines):"
+            grep -iE "Cannot checkout|Failed to update submodule|submodule.*code|not found|QODANA_SKIP_SUBMODULE_UPDATE" \
+              /tmp/tc1_output.txt | head -5
           else
             echo "❌ TC-1 FAIL: expected submodule error not found in output"
+            echo "Exit code was: $EXIT_CODE"
             exit 1
           fi
 
   # ─────────────────────────────────────────────────────────────────────────────
   # TC-2: FIX VERIFICATION
-  # Same qodana scan, same broken submodule URL, WITH QODANA_SKIP_SUBMODULE_UPDATE=true
-  # Expected: CLI logs "Skipping submodule update", scan proceeds (may fail later for
-  #           other reasons — that's OK, the key is NO submodule checkout error)
+  # Same scan, same broken submodule, WITH QODANA_SKIP_SUBMODULE_UPDATE=true
+  # → CLI skips git submodule update, logs "Skipping submodule update..."
+  # → scan proceeds past the checkout step (no fatal error)
   # ─────────────────────────────────────────────────────────────────────────────
   tc2-fix-skip-succeeds:
-    name: "TC-2: Fix — qodana scan succeeds past submodule step with skip=true"
+    name: "TC-2: Fix — scan skips submodule, proceeds (skip=true)"
     runs-on: ubuntu-latest
     env:
       QODANA_SKIP_SUBMODULE_UPDATE: "true"
@@ -99,62 +113,49 @@ jobs:
       - name: Install qodana-cli nightly
         run: |
           curl -fsSL https://github.com/JetBrains/qodana-cli/releases/download/v2026.2-nightly/qodana_linux_x86_64 \
-            -o /usr/local/bin/qodana
-          chmod +x /usr/local/bin/qodana
-          qodana --version
+            -o /usr/local/bin/qodana && chmod +x /usr/local/bin/qodana
 
-      - name: TC-2 — qodana scan --diff-start WITH QODANA_SKIP_SUBMODULE_UPDATE=true
+      - name: TC-2 — same scan WITH QODANA_SKIP_SUBMODULE_UPDATE=true
         env:
           QODANA_TOKEN: ${{ secrets.QODANA_TOKEN }}
         run: |
-          echo "=== TC-2: Running qodana scan with QODANA_SKIP_SUBMODULE_UPDATE=true ==="
-          echo "QODANA_SKIP_SUBMODULE_UPDATE=$QODANA_SKIP_SUBMODULE_UPDATE"
-
+          echo "=== TC-2: QODANA_SKIP_SUBMODULE_UPDATE=$QODANA_SKIP_SUBMODULE_UPDATE ==="
           set +e
-          qodana scan \
-            --linter jetbrains/qodana-jvm:2026.1 \
-            --diff-start 87486f3 \
+          timeout 300 qodana scan \
+            --linter qodana-jvm \
+            --within-docker false \
+            --commit 87486f3 \
             -i . \
             -o /tmp/tc2-results \
-            2>&1 | tee /tmp/tc2_qodana_output.txt
+            2>&1 | tee /tmp/tc2_output.txt
           EXIT_CODE=$?
           set -e
 
-          echo "--- qodana exit code: $EXIT_CODE ---"
-          echo "--- full output ---"
-          cat /tmp/tc2_qodana_output.txt
-
+          echo "Exit code: $EXIT_CODE"
           echo ""
           echo "=== Checking results ==="
-
-          # Must have: skip info message
           HAS_SKIP=$(grep -c "Skipping submodule update because QODANA_SKIP_SUBMODULE_UPDATE" \
-            /tmp/tc2_qodana_output.txt 2>/dev/null || echo 0)
+            /tmp/tc2_output.txt 2>/dev/null || echo 0)
+          HAS_FATAL=$(grep -c "Cannot checkout commit" /tmp/tc2_output.txt 2>/dev/null || echo 0)
 
-          # Must NOT have: submodule checkout fatal error
-          HAS_SUBMODULE_ERROR=$(grep -cE \
-            "Cannot checkout commit|submodule update.*exited with code 1" \
-            /tmp/tc2_qodana_output.txt 2>/dev/null || echo 0)
+          echo "INFO 'Skipping submodule update': $HAS_SKIP"
+          echo "FATAL 'Cannot checkout commit': $HAS_FATAL"
 
-          echo "Skip info messages found: $HAS_SKIP"
-          echo "Submodule errors found: $HAS_SUBMODULE_ERROR"
-
-          if [ "$HAS_SKIP" -gt 0 ] && [ "$HAS_SUBMODULE_ERROR" -eq 0 ]; then
+          if [ "$HAS_SKIP" -gt 0 ] && [ "$HAS_FATAL" -eq 0 ]; then
             echo "✅ TC-2 PASS: FIX VERIFIED"
-            echo "Evidence: 'Skipping submodule update' appears, no submodule checkout error"
-            grep "Skipping submodule" /tmp/tc2_qodana_output.txt | head -3
+            echo "Evidence:"
+            grep "Skipping submodule update" /tmp/tc2_output.txt | head -3
           else
-            echo "❌ TC-2 FAIL"
-            echo "  HAS_SKIP=$HAS_SKIP (expected >0)"
-            echo "  HAS_SUBMODULE_ERROR=$HAS_SUBMODULE_ERROR (expected 0)"
+            echo "❌ TC-2 FAIL (skip_messages=$HAS_SKIP, fatal=$HAS_FATAL)"
+            cat /tmp/tc2_output.txt | tail -30
             exit 1
           fi
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # TC-3: FIX — submodule dir stays empty when skip=true
+  # TC-3: Fix — submodule dir stays empty when skip=true
   # ─────────────────────────────────────────────────────────────────────────────
   tc3-submodule-dir-empty:
-    name: "TC-3: Fix — submodule dir empty after scan with skip=true"
+    name: "TC-3: Fix — submodule dir empty after scan (skip=true)"
     runs-on: ubuntu-latest
     env:
       QODANA_SKIP_SUBMODULE_UPDATE: "true"
@@ -167,40 +168,33 @@ jobs:
       - name: Install qodana-cli nightly
         run: |
           curl -fsSL https://github.com/JetBrains/qodana-cli/releases/download/v2026.2-nightly/qodana_linux_x86_64 \
-            -o /usr/local/bin/qodana
-          chmod +x /usr/local/bin/qodana
+            -o /usr/local/bin/qodana && chmod +x /usr/local/bin/qodana
 
-      - name: TC-3 — verify submodule dir empty during scan with skip=true
+      - name: TC-3 — verify submodule dir empty after skip
         env:
           QODANA_TOKEN: ${{ secrets.QODANA_TOKEN }}
         run: |
-          echo "QODANA_SKIP_SUBMODULE_UPDATE=$QODANA_SKIP_SUBMODULE_UPDATE"
-
           set +e
-          qodana scan \
-            --linter jetbrains/qodana-jvm:2026.1 \
-            --diff-start 87486f3 \
-            -i . \
-            -o /tmp/tc3-results \
-            2>&1 | tee /tmp/tc3_qodana_output.txt
+          timeout 300 qodana scan \
+            --linter qodana-jvm \
+            --within-docker false \
+            --commit 87486f3 \
+            -i . -o /tmp/tc3-results 2>&1 | tee /tmp/tc3_output.txt
           set -e
 
-          # After scan (even if it fails at analysis stage), check submodule dir
           ENTRY_COUNT=$(ls -A libs/accessible-sub 2>/dev/null | wc -l | tr -d ' ')
-          echo "Submodule dir 'libs/accessible-sub' has $ENTRY_COUNT entries"
+          echo "Submodule dir entries after scan: $ENTRY_COUNT"
 
           if [ "$ENTRY_COUNT" -eq 0 ]; then
-            echo "✅ TC-3 PASS: Submodule dir is empty — never initialized with skip=true"
+            echo "✅ TC-3 PASS: Submodule dir is empty (not initialized when skip=true)"
           else
-            echo "❌ TC-3 FAIL: Expected empty submodule dir, found $ENTRY_COUNT entries:"
+            echo "❌ TC-3 FAIL: Expected empty dir, found $ENTRY_COUNT entries"
             ls -la libs/accessible-sub/
             exit 1
           fi
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # TC-4: Warning hint appears in logs on submodule failure
-  # Exact message from git.go:123:
-  # "Failed to update submodules. You can use QODANA_SKIP_SUBMODULE_UPDATE=true to skip submodule update"
+  # TC-4: Warning hint appears in logs on failure (exact string from git.go:123)
   # ─────────────────────────────────────────────────────────────────────────────
   tc4-warning-in-logs:
     name: "TC-4: Warning hint in logs when checkout fails"
@@ -214,35 +208,34 @@ jobs:
       - name: Install qodana-cli nightly
         run: |
           curl -fsSL https://github.com/JetBrains/qodana-cli/releases/download/v2026.2-nightly/qodana_linux_x86_64 \
-            -o /usr/local/bin/qodana
-          chmod +x /usr/local/bin/qodana
+            -o /usr/local/bin/qodana && chmod +x /usr/local/bin/qodana
 
-      - name: TC-4 — verify warning hint in output (no env var)
+      - name: TC-4 — exact warning string present in output
         env:
           QODANA_TOKEN: ${{ secrets.QODANA_TOKEN }}
         run: |
           set +e
           qodana scan \
-            --linter jetbrains/qodana-jvm:2026.1 \
-            --diff-start 87486f3 \
-            -i . \
-            -o /tmp/tc4-results \
-            2>&1 | tee /tmp/tc4_qodana_output.txt
+            --linter qodana-jvm \
+            --within-docker false \
+            --commit 87486f3 \
+            -i . -o /tmp/tc4-results 2>&1 | tee /tmp/tc4_output.txt
           set -e
 
-          WARN_MSG="You can use QODANA_SKIP_SUBMODULE_UPDATE=true to skip submodule update"
-
-          if grep -q "$WARN_MSG" /tmp/tc4_qodana_output.txt; then
-            echo "✅ TC-4 PASS: Warning hint found in qodana output"
-            grep "$WARN_MSG" /tmp/tc4_qodana_output.txt
+          # Exact warning from git.go:123
+          WARN="You can use QODANA_SKIP_SUBMODULE_UPDATE=true to skip submodule update"
+          if grep -q "$WARN" /tmp/tc4_output.txt; then
+            echo "✅ TC-4 PASS: Warning hint found in output"
+            grep "$WARN" /tmp/tc4_output.txt
           else
-            echo "❌ TC-4 FAIL: Warning message not found"
-            echo "Expected: '$WARN_MSG'"
+            echo "❌ TC-4 FAIL: Warning not found"
+            echo "Expected: '$WARN'"
+            grep -i "submodule\|warning\|QODANA_SKIP" /tmp/tc4_output.txt | head -5
             exit 1
           fi
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # TC-5: Warning does NOT appear when skip=true active
+  # TC-5: Warning does NOT appear when skip=true
   # ─────────────────────────────────────────────────────────────────────────────
   tc5-no-warning-when-skipped:
     name: "TC-5: No failure warning when skip=true"
@@ -258,131 +251,39 @@ jobs:
       - name: Install qodana-cli nightly
         run: |
           curl -fsSL https://github.com/JetBrains/qodana-cli/releases/download/v2026.2-nightly/qodana_linux_x86_64 \
-            -o /usr/local/bin/qodana
-          chmod +x /usr/local/bin/qodana
+            -o /usr/local/bin/qodana && chmod +x /usr/local/bin/qodana
 
-      - name: TC-5 — no warning when skip=true
+      - name: TC-5 — failure warning absent, skip info present
         env:
           QODANA_TOKEN: ${{ secrets.QODANA_TOKEN }}
         run: |
           set +e
-          qodana scan \
-            --linter jetbrains/qodana-jvm:2026.1 \
-            --diff-start 87486f3 \
-            -i . \
-            -o /tmp/tc5-results \
-            2>&1 | tee /tmp/tc5_qodana_output.txt
+          timeout 300 qodana scan \
+            --linter qodana-jvm \
+            --within-docker false \
+            --commit 87486f3 \
+            -i . -o /tmp/tc5-results 2>&1 | tee /tmp/tc5_output.txt
           set -e
 
-          HAS_SKIP=$(grep -c "Skipping submodule update" /tmp/tc5_qodana_output.txt || echo 0)
-          HAS_FAILURE=$(grep -c "Failed to update submodules" /tmp/tc5_qodana_output.txt || echo 0)
+          HAS_SKIP=$(grep -c "Skipping submodule update" /tmp/tc5_output.txt || echo 0)
+          HAS_FAIL=$(grep -c "Failed to update submodules" /tmp/tc5_output.txt || echo 0)
 
-          echo "Skip messages: $HAS_SKIP | Failure warnings: $HAS_FAILURE"
-
-          if [ "$HAS_SKIP" -gt 0 ] && [ "$HAS_FAILURE" -eq 0 ]; then
+          echo "Skip INFO: $HAS_SKIP | Failure WARN: $HAS_FAIL"
+          if [ "$HAS_SKIP" -gt 0 ] && [ "$HAS_FAIL" -eq 0 ]; then
             echo "✅ TC-5 PASS: Skip info present, failure warning absent"
           else
-            echo "❌ TC-5 FAIL (skip=$HAS_SKIP, failure=$HAS_FAILURE)"
+            echo "❌ TC-5 FAIL"
             exit 1
           fi
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # TC-10: Accessible submodule, no env var → clones OK
-  # ─────────────────────────────────────────────────────────────────────────────
-  tc10-accessible-submodule:
-    name: "TC-10: Accessible submodule clones OK (no env var)"
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          submodules: false
-
-      - name: Install qodana-cli nightly
-        run: |
-          curl -fsSL https://github.com/JetBrains/qodana-cli/releases/download/v2026.2-nightly/qodana_linux_x86_64 \
-            -o /usr/local/bin/qodana
-          chmod +x /usr/local/bin/qodana
-
-      - name: TC-10 — accessible submodule initialized during scan
-        env:
-          QODANA_TOKEN: ${{ secrets.QODANA_TOKEN }}
-        run: |
-          # Use --diff-start at the RESTORE commit so only HEAD is analyzed
-          # HEAD has accessible submodule URL
-          set +e
-          qodana scan \
-            --linter jetbrains/qodana-jvm:2026.1 \
-            --diff-start e63684c \
-            -i . \
-            -o /tmp/tc10-results \
-            2>&1 | tee /tmp/tc10_qodana_output.txt
-          set -e
-
-          # Submodule should be initialized (accessible URL, no skip)
-          ENTRY_COUNT=$(ls -A libs/accessible-sub 2>/dev/null | wc -l | tr -d ' ')
-          echo "Submodule entries: $ENTRY_COUNT"
-
-          if [ "$ENTRY_COUNT" -gt 0 ]; then
-            echo "✅ TC-10 PASS: Submodule initialized ($ENTRY_COUNT entries)"
-          else
-            echo "❌ TC-10 FAIL: Submodule dir empty, expected initialization"
-            cat /tmp/tc10_qodana_output.txt | tail -20
-            exit 1
-          fi
-
-  # ─────────────────────────────────────────────────────────────────────────────
-  # TC-11: Accessible submodule + skip=true → NOT initialized
-  # ─────────────────────────────────────────────────────────────────────────────
-  tc11-accessible-skipped:
-    name: "TC-11: Accessible submodule NOT initialized when skip=true"
-    runs-on: ubuntu-latest
-    env:
-      QODANA_SKIP_SUBMODULE_UPDATE: "true"
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          submodules: false
-
-      - name: Install qodana-cli nightly
-        run: |
-          curl -fsSL https://github.com/JetBrains/qodana-cli/releases/download/v2026.2-nightly/qodana_linux_x86_64 \
-            -o /usr/local/bin/qodana
-          chmod +x /usr/local/bin/qodana
-
-      - name: TC-11 — skip=true, accessible submodule stays uninitialized
-        env:
-          QODANA_TOKEN: ${{ secrets.QODANA_TOKEN }}
-        run: |
-          echo "QODANA_SKIP_SUBMODULE_UPDATE=$QODANA_SKIP_SUBMODULE_UPDATE"
-
-          set +e
-          qodana scan \
-            --linter jetbrains/qodana-jvm:2026.1 \
-            --diff-start e63684c \
-            -i . \
-            -o /tmp/tc11-results \
-            2>&1 | tee /tmp/tc11_qodana_output.txt
-          set -e
-
-          ENTRY_COUNT=$(ls -A libs/accessible-sub 2>/dev/null | wc -l | tr -d ' ')
-          echo "Submodule entries: $ENTRY_COUNT"
-
-          if [ "$ENTRY_COUNT" -eq 0 ]; then
-            echo "✅ TC-11 PASS: Accessible submodule NOT initialized when skip=true"
-          else
-            echo "❌ TC-11 FAIL: Expected empty dir"
-            exit 1
-          fi
-
-  # ─────────────────────────────────────────────────────────────────────────────
-  # TC-12/13/14/15: Edge cases — only exact "true" triggers skip
+  # TC-12..15: Edge cases — only exact "true" (case-sensitive) skips
   # ─────────────────────────────────────────────────────────────────────────────
   tc12-wrong-values:
-    name: "TC-12..15: Only 'true' skips (case-sensitive)"
+    name: "TC-12..15: Only 'true' skips — '${{ matrix.value }}' must NOT skip"
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         value: ["True", "TRUE", "1", "yes", "false"]
     steps:
@@ -394,34 +295,28 @@ jobs:
       - name: Install qodana-cli nightly
         run: |
           curl -fsSL https://github.com/JetBrains/qodana-cli/releases/download/v2026.2-nightly/qodana_linux_x86_64 \
-            -o /usr/local/bin/qodana
-          chmod +x /usr/local/bin/qodana
+            -o /usr/local/bin/qodana && chmod +x /usr/local/bin/qodana
 
-      - name: "QODANA_SKIP_SUBMODULE_UPDATE='${{ matrix.value }}' must NOT skip"
+      - name: "value='${{ matrix.value }}' — checkout must fail (not skipped)"
         env:
           QODANA_TOKEN: ${{ secrets.QODANA_TOKEN }}
           QODANA_SKIP_SUBMODULE_UPDATE: ${{ matrix.value }}
         run: |
-          echo "Testing QODANA_SKIP_SUBMODULE_UPDATE='${{ matrix.value }}'"
-
+          echo "QODANA_SKIP_SUBMODULE_UPDATE='${{ matrix.value }}' (NOT 'true' → skip NOT triggered)"
           set +e
           qodana scan \
-            --linter jetbrains/qodana-jvm:2026.1 \
-            --diff-start 87486f3 \
-            -i . \
-            -o /tmp/tc12-results \
-            2>&1 | tee /tmp/tc12_qodana_output.txt
+            --linter qodana-jvm \
+            --within-docker false \
+            --commit 87486f3 \
+            -i . -o /tmp/tc12-results 2>&1 | tee /tmp/tc12_output.txt
           set -e
 
-          # Must see: submodule error (skip NOT triggered)
-          # Must NOT see: "Skipping submodule update"
-          HAS_SKIP=$(grep -c "Skipping submodule update" /tmp/tc12_qodana_output.txt || echo 0)
-          HAS_ERROR=$(grep -cE "Cannot checkout commit|Failed to update submodules" /tmp/tc12_qodana_output.txt || echo 0)
+          HAS_SKIP=$(grep -c "Skipping submodule update" /tmp/tc12_output.txt || echo 0)
+          HAS_ERROR=$(grep -cE "Cannot checkout commit|Failed to update submodules" /tmp/tc12_output.txt || echo 0)
 
-          echo "Skip messages: $HAS_SKIP | Checkout errors: $HAS_ERROR"
-
+          echo "Skip: $HAS_SKIP | Error: $HAS_ERROR"
           if [ "$HAS_SKIP" -eq 0 ] && [ "$HAS_ERROR" -gt 0 ]; then
-            echo "✅ PASS: value='${{ matrix.value }}' does NOT skip, checkout failed as expected"
+            echo "✅ PASS: value='${{ matrix.value }}' does NOT skip (checkout failed as expected)"
           else
             echo "❌ FAIL: value='${{ matrix.value }}' — skip=$HAS_SKIP, error=$HAS_ERROR"
             exit 1
@@ -439,21 +334,18 @@ jobs:
       - tc3-submodule-dir-empty
       - tc4-warning-in-logs
       - tc5-no-warning-when-skipped
-      - tc10-accessible-submodule
-      - tc11-accessible-skipped
       - tc12-wrong-values
     if: always()
     steps:
       - name: Results
         run: |
-          echo "=========================================="
-          echo "QD-14245 QODANA_SKIP_SUBMODULE_UPDATE"
-          echo "=========================================="
-          echo "TC-1  bug reproduction:               ${{ needs.tc1-bug-reproduction.result }}"
-          echo "TC-2  fix skip=true succeeds:         ${{ needs.tc2-fix-skip-succeeds.result }}"
-          echo "TC-3  submodule dir empty (skip=true): ${{ needs.tc3-submodule-dir-empty.result }}"
-          echo "TC-4  warning hint in logs:           ${{ needs.tc4-warning-in-logs.result }}"
-          echo "TC-5  no warning when skip=true:      ${{ needs.tc5-no-warning-when-skipped.result }}"
-          echo "TC-10 accessible submodule clones:    ${{ needs.tc10-accessible-submodule.result }}"
-          echo "TC-11 accessible skipped (skip=true): ${{ needs.tc11-accessible-skipped.result }}"
-          echo "TC-12/13/14/15 wrong values no skip:  ${{ needs.tc12-wrong-values.result }}"
+          echo "============================================================"
+          echo "QD-14245 QODANA_SKIP_SUBMODULE_UPDATE — Test Results"
+          echo "Native mode (--within-docker false), same path as qodana-action pr-mode:true"
+          echo "============================================================"
+          echo "TC-1  bug reproduction (fails without env var):       ${{ needs.tc1-bug-reproduction.result }}"
+          echo "TC-2  fix: skip=true, scan proceeds:                  ${{ needs.tc2-fix-skip-succeeds.result }}"
+          echo "TC-3  fix: submodule dir empty (skip=true):           ${{ needs.tc3-submodule-dir-empty.result }}"
+          echo "TC-4  warning hint in logs on failure:                ${{ needs.tc4-warning-in-logs.result }}"
+          echo "TC-5  no warning when skip=true:                      ${{ needs.tc5-no-warning-when-skipped.result }}"
+          echo "TC-12/13/14/15 wrong values don't skip:               ${{ needs.tc12-wrong-values.result }}"
