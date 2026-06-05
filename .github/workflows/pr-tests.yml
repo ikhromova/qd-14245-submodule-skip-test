@@ -19,7 +19,7 @@ on:
 # ─────────────────────────────────────────────────────────────────────────────
 
 env:
-  QODANA_CLI_URL: "https://github.com/JetBrains/qodana-cli/releases/download/v2026.2-nightly/qodana_linux_x86_64"
+  QODANA_CLI_URL: "https://github.com/JetBrains/qodana-cli/releases/download/v2026.1.1/qodana_linux_x86_64"
   RESULTS_DIR: "/tmp/qd-results"
 
 jobs:
