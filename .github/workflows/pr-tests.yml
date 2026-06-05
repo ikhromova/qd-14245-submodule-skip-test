@@ -70,9 +70,8 @@ jobs:
             /tmp/tc1_output.txt | head -10 || echo "(none)"
 
           # Bug signature (QD-13159): level=fatal msg="Cannot checkout commit <sha>: ..."
-          HAS_FATAL=$(grep -c "Cannot checkout commit" /tmp/tc1_output.txt 2>/dev/null || echo 0)
-          HAS_SKIP=$(grep -c "Skipping submodule update because QODANA_SKIP_SUBMODULE_UPDATE" \
-            /tmp/tc1_output.txt 2>/dev/null || echo 0)
+          HAS_FATAL=0; grep -q "Cannot checkout commit" /tmp/tc1_output.txt 2>/dev/null && HAS_FATAL=1 || true
+          HAS_SKIP=0; grep -q "Skipping submodule update because QODANA_SKIP_SUBMODULE_UPDATE" /tmp/tc1_output.txt 2>/dev/null && HAS_SKIP=1 || true
 
           echo ""
           echo "fatal checkout error: $HAS_FATAL | skip info: $HAS_SKIP"
@@ -130,9 +129,8 @@ jobs:
           grep -iE "submodule|QODANA_SKIP|Skipping|Cannot checkout|fatal" \
             /tmp/tc2_output.txt | head -10 || echo "(none)"
 
-          HAS_SKIP=$(grep -c "Skipping submodule update because QODANA_SKIP_SUBMODULE_UPDATE" \
-            /tmp/tc2_output.txt 2>/dev/null || echo 0)
-          HAS_FATAL=$(grep -c "Cannot checkout commit" /tmp/tc2_output.txt 2>/dev/null || echo 0)
+          HAS_SKIP=0; grep -q "Skipping submodule update because QODANA_SKIP_SUBMODULE_UPDATE" /tmp/tc2_output.txt 2>/dev/null && HAS_SKIP=1 || true
+          HAS_FATAL=0; grep -q "Cannot checkout commit" /tmp/tc2_output.txt 2>/dev/null && HAS_FATAL=1 || true
 
           echo ""
           echo "skip info: $HAS_SKIP | fatal error: $HAS_FATAL"
@@ -270,9 +268,8 @@ jobs:
             --commit "$MERGE_BASE" -i . -o "$RESULTS_DIR" 2>&1 | tee /tmp/tc5_output.txt
           set -e
 
-          HAS_SKIP=$(grep -c "Skipping submodule update because QODANA_SKIP_SUBMODULE_UPDATE" \
-            /tmp/tc5_output.txt 2>/dev/null || echo 0)
-          HAS_FATAL=$(grep -c "Cannot checkout commit" /tmp/tc5_output.txt 2>/dev/null || echo 0)
+          HAS_SKIP=0; grep -q "Skipping submodule update because QODANA_SKIP_SUBMODULE_UPDATE" /tmp/tc5_output.txt 2>/dev/null && HAS_SKIP=1 || true
+          HAS_FATAL=0; grep -q "Cannot checkout commit" /tmp/tc5_output.txt 2>/dev/null && HAS_FATAL=1 || true
 
           echo "Skip INFO: $HAS_SKIP | Fatal error: $HAS_FATAL"
           if [ "$HAS_SKIP" -gt 0 ] && [ "$HAS_FATAL" -eq 0 ]; then
@@ -318,9 +315,8 @@ jobs:
             --commit "$MERGE_BASE" -i . -o "$RESULTS_DIR" 2>&1 | tee /tmp/tc12_output.txt
           set -e
 
-          HAS_SKIP=$(grep -c "Skipping submodule update because QODANA_SKIP_SUBMODULE_UPDATE" \
-            /tmp/tc12_output.txt 2>/dev/null || echo 0)
-          HAS_FATAL=$(grep -c "Cannot checkout commit" /tmp/tc12_output.txt 2>/dev/null || echo 0)
+          HAS_SKIP=0; grep -q "Skipping submodule update because QODANA_SKIP_SUBMODULE_UPDATE" /tmp/tc12_output.txt 2>/dev/null && HAS_SKIP=1 || true
+          HAS_FATAL=0; grep -q "Cannot checkout commit" /tmp/tc12_output.txt 2>/dev/null && HAS_FATAL=1 || true
 
           echo "Value='${{ matrix.value }}' | Skip: $HAS_SKIP | Fatal: $HAS_FATAL"
           # Must NOT skip → fatal error appears, no skip info
