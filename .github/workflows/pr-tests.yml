@@ -266,3 +266,39 @@ jobs:
             echo "❌ FAIL: skip=$HAS_SKIP error=$HAS_ERROR"
             exit 1
           fi
+  # debug helper job
+  debug-logs:
+    name: "DEBUG: Dump git.log from scan results"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      - name: Qodana Scan (pr-mode:true)
+        id: qodana
+        uses: JetBrains/qodana-action@v2025.3
+        continue-on-error: true
+        with:
+          pr-mode: true
+          results-dir: /tmp/qd-debug-results
+          upload-result: false
+        env:
+          QODANA_TOKEN: ${{ secrets.QODANA_TOKEN }}
+
+      - name: Dump all log files
+        run: |
+          echo "=== qodana-action outcome: ${{ steps.qodana.outcome }} ==="
+          echo ""
+          echo "=== Log dir ==="
+          ls /tmp/qd-debug-results/log/ 2>/dev/null
+          echo ""
+          echo "=== git.log (first 50 lines) ==="
+          head -50 /tmp/qd-debug-results/log/git.log 2>/dev/null || echo "(no git.log)"
+          echo ""
+          echo "=== git.log grep submodule ==="
+          grep -i "submodule\|checkout commit\|QODANA_SKIP" /tmp/qd-debug-results/log/git.log 2>/dev/null || echo "(nothing)"
+          echo ""
+          echo "=== config-loader-cli-out.log ==="
+          head -30 /tmp/qd-debug-results/log/config-loader-cli-out.log 2>/dev/null || echo "(no file)"
