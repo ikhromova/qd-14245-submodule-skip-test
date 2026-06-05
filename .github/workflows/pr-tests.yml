@@ -119,6 +119,7 @@ jobs:
           qodana scan \
             --linter qodana-jvm \
             --within-docker false \
+            --log-level debug \
             --commit "$MERGE_BASE" \
             -i . \
             -o "$RESULTS_DIR" \
@@ -264,7 +265,7 @@ jobs:
           QODANA_TOKEN: ${{ secrets.QODANA_TOKEN }}
         run: |
           set +e
-          qodana scan --linter qodana-jvm --within-docker false \
+          qodana scan --linter qodana-jvm --within-docker false --log-level debug \
             --commit "$MERGE_BASE" -i . -o "$RESULTS_DIR" 2>&1 | tee /tmp/tc5_output.txt
           set -e
 
