@@ -6,24 +6,52 @@ on:
 
 jobs:
 
-  # Воспроизведение бага: qodana-action pr-mode:true на PR с недоступным сабмодулем
-  # Ожидаем: level=fatal "Cannot checkout commit <sha>: failed to update submodule..."
-  # (это точная ошибка из QD-13159)
+  # ───────────────────────────────────────────────────────────────────
+  # БАГ: qodana-action@v2025.3, pr-mode:true, без QODANA_SKIP_SUBMODULE_UPDATE
+  # Ожидаем: level=fatal "Cannot checkout commit <sha>: command git submodule update
+  #          --init --recursive --force exited with code 1"
+  # Это точная ошибка из QD-13159
+  # ───────────────────────────────────────────────────────────────────
   bug-reproduction:
-    name: "BUG: qodana scan falls with inaccessible submodule"
+    name: "BUG (QD-13159): scan fails — inaccessible submodule"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          submodules: false   # fresh clone — нет кэша сабмодулей, как в реальном CI
+          submodules: false
 
       - name: Qodana Scan
         uses: JetBrains/qodana-action@v2025.3
         with:
           pr-mode: true
-          args: "--within-docker,false,--linter,qodana-jvm"
+          args: "--within-docker false --linter qodana-jvm"
           upload-result: false
         env:
           QODANA_TOKEN: ${{ secrets.QODANA_TOKEN }}
           # QODANA_SKIP_SUBMODULE_UPDATE намеренно НЕ установлен
+
+  # ───────────────────────────────────────────────────────────────────
+  # ФИКС: qodana-action@v2026.1, pr-mode:true, QODANA_SKIP_SUBMODULE_UPDATE=true
+  # Ожидаем: level=info "Skipping submodule update because QODANA_SKIP_SUBMODULE_UPDATE=true"
+  # Скан завершается без ошибок
+  # ───────────────────────────────────────────────────────────────────
+  fix-verification:
+    name: "FIX (QD-14245): scan succeeds with QODANA_SKIP_SUBMODULE_UPDATE=true"
+    runs-on: ubuntu-latest
+    env:
+      QODANA_SKIP_SUBMODULE_UPDATE: "true"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      - name: Qodana Scan
+        uses: JetBrains/qodana-action@v2026.1
+        with:
+          pr-mode: true
+          args: "--within-docker false --linter qodana-jvm --log-level debug"
+          upload-result: false
+        env:
+          QODANA_TOKEN: ${{ secrets.QODANA_TOKEN }}
